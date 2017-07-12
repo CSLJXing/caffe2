@@ -41,7 +41,9 @@ def Parallelize(
     rendezvous=None,
     net_type='dag',
     broadcast_computed_params=True,
-    optimize_gradient_memory=False,
+    optimize_memory=False,
+    recycle_activations=False,
+    excluded_blobs=[],
     use_nccl=False,
     max_concurrent_distributed_ops=16,
     cpu_device=False,
@@ -274,7 +276,7 @@ def Parallelize(
                     post_sync_builder_fun(model_helper_obj)
 
     if optimize_gradient_memory:
-        _OptimizeGradientMemorySimple(model_helper_obj, losses_by_gpu, devices)
+        OptimizeGradientMemory(model_helper_obj, {}, excluded_blobs, recycle_activations)
 
     model_helper_obj._data_parallel_model_init_nets = [
         model_helper_obj.param_init_net,
