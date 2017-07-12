@@ -275,7 +275,7 @@ def Parallelize(
                 ):
                     post_sync_builder_fun(model_helper_obj)
 
-    if optimize_gradient_memory:
+    if optimize_memory:
         OptimizeGradientMemory(model_helper_obj, {}, excluded_blobs, recycle_activations)
 
     model_helper_obj._data_parallel_model_init_nets = [
