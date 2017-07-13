@@ -19,6 +19,7 @@ import caffe2.python.models.resnet as resnet
 import caffe2.python.predictor.predictor_exporter as pred_exp
 import caffe2.python.predictor.predictor_py_utils as pred_utils
 from caffe2.python.predictor_constants import predictor_constants as predictor_constants
+from caffe2.proto import caffe2_pb2
 
 '''
 Parallelized multi-GPU distributed trainer for Resnet 50. Can be used to train
@@ -45,7 +46,7 @@ dyndep.InitOpsLibrary('@/caffe2/caffe2/distributed:file_store_handler_ops')
 dyndep.InitOpsLibrary('@/caffe2/caffe2/distributed:redis_store_handler_ops')
 
 
-def AddImageInput(model, reader, batch_size, img_size):
+def AddImageInput(model, reader, batch_size, img_size, is_test):
     '''
     Image input operator that loads data from reader and
     applies certain transformations to the images.
@@ -54,62 +55,62 @@ def AddImageInput(model, reader, batch_size, img_size):
         model,
         reader, ["data", "label"],
         batch_size=batch_size,
-        use_caffe_datum=True,
+        use_caffe_datum=False,
         mean=128.,
         std=128.,
         scale=256,
         crop=img_size,
-        mirror=1
+        is_test=is_test,
+        mirror= 0 if is_test else 1
     )
 
     data = model.StopGradient(data, data)
 
 
 def SaveModel(args, train_model, epoch):
-    prefix = "[]_{}".format(train_model._device_prefix, train_model._devices[0])
-    predictor_export_meta = pred_exp.PredictorExportMeta(
-        predict_net=train_model.net.Proto(),
-        parameters=data_parallel_model.GetCheckpointParams(train_model),
-        inputs=[prefix + "/data"],
-        outputs=[prefix + "/softmax"],
-        shapes={
-            prefix + "/softmax": (1, args.num_labels),
-            prefix + "/data": (args.num_channels, args.image_size, args.image_size)
-        }
+    # device prefix to be triped
+    prefix = "{}_{}/".format(
+        train_model._device_prefix, train_model._devices[0]
     )
-
     # save the train_model for the current epoch
     model_path = "%s/%s_%d.mdl" % (
         args.file_store_path,
         args.save_model_name,
         epoch,
     )
-
-    # set db_type to be "minidb" instead of "log_file_db", which breaks
-    # the serialization in save_to_db. Need to switch back to log_file_db
-    # after migration
-    pred_exp.save_to_db(
-        db_type="minidb",
-        db_destination=model_path,
-        predictor_export_meta=predictor_export_meta,
+    save_op = core.CreateOperator(
+        "Save",
+        list(data_parallel_model.GetCheckpointParams(train_model)),
+        [],
+        absolute_path=True,
+        strip_prefix=prefix,
+        db=model_path,
+        db_type='minidb'
     )
+    workspace.RunOperatorOnce(save_op)
 
 
 def LoadModel(path, model):
     '''
     Load pretrained model from file
     '''
-    log.info("Loading path: {}".format(path))
-    meta_net_def = pred_exp.load_from_db(path, 'minidb')
-    init_net = core.Net(pred_utils.GetNet(
-        meta_net_def, predictor_constants.GLOBAL_INIT_NET_TYPE))
-    predict_init_net = core.Net(pred_utils.GetNet(
-        meta_net_def, predictor_constants.PREDICT_INIT_NET_TYPE))
-
-    predict_init_net.RunAllOnGPU()
-    init_net.RunAllOnGPU()
-    assert workspace.RunNetOnce(predict_init_net)
-    assert workspace.RunNetOnce(init_net)
+    prefix = "{}_{}/".format(
+        model._device_prefix, model._devices[0]
+    )
+    load_op = core.CreateOperator(
+        "Load",
+        [], [],
+        load_all=True,
+        add_prefix=prefix,
+        db=path,
+        db_type='minidb'
+    )
+    load_op.device_option.CopyFrom(core.DeviceOption(caffe2_pb2.CUDA, model._devices[0]))
+    workspace.RunOperatorOnce(load_op)
+    workspace.FeedBlob(
+        'optimizer_iteration',
+        workspace.FetchBlob(prefix + 'optimizer_iteration')
+    )
 
 
 def RunEpoch(
@@ -254,7 +255,7 @@ def Train(args):
         rendezvous = None
 
     # Model building functions
-    def create_resnet50_model_ops(model, loss_scale):
+    def create_resnet50_model_train_ops(model, loss_scale):
         [softmax, loss] = resnet.create_resnet50(
             model,
             "data",
@@ -262,6 +263,7 @@ def Train(args):
             num_labels=args.num_labels,
             label="label",
             no_bias=True,
+            is_test=False
         )
         loss = model.Scale(loss, scale=loss_scale)
         brew.accuracy(model, [softmax, "label"], "accuracy")
@@ -289,23 +291,26 @@ def Train(args):
         shard_id=shard_id,
     )
 
-    def add_image_input(model):
+    def train_image_input_fn(model):
         AddImageInput(
             model,
             reader,
             batch_size=batch_per_device,
             img_size=args.image_size,
+            is_test=False
         )
 
     # Create parallelized model
     data_parallel_model.Parallelize(
         train_model,
-        input_builder_fun=add_image_input,
-        forward_pass_builder_fun=create_resnet50_model_ops,
+        input_builder_fun=train_image_input_fn,
+        forward_pass_builder_fun=create_resnet50_model_train_ops,
         optimizer_builder_fun=add_optimizer,
         devices=gpus,
         rendezvous=rendezvous,
-        optimize_gradient_memory=True,
+        optimize_memory=True,
+        recycle_activations=True,
+        excluded_blobs=['accuracy','loss'],
         cpu_device=args.use_cpu,
     )
 
@@ -328,18 +333,33 @@ def Train(args):
             db_type=args.db_type,
         )
 
-        def test_input_fn(model):
+        def test_image_input_fn(model):
             AddImageInput(
                 model,
                 test_reader,
                 batch_size=batch_per_device,
                 img_size=args.image_size,
+                is_test=True
             )
+
+        def create_resnet50_model_test_ops(model, loss_scale):
+            [softmax, loss] = resnet.create_resnet50(
+                model,
+                "data",
+                num_input_channels=args.num_channels,
+                num_labels=args.num_labels,
+                label="label",
+                no_bias=True,
+                is_test=True
+            )
+            loss = model.Scale(loss, scale=loss_scale)
+            brew.accuracy(model, [softmax, "label"], "accuracy")
+            return [loss]
 
         data_parallel_model.Parallelize(
             test_model,
-            input_builder_fun=test_input_fn,
-            forward_pass_builder_fun=create_resnet50_model_ops,
+            input_builder_fun=test_image_input_fn,
+            forward_pass_builder_fun=create_resnet50_model_test_ops,
             param_update_builder_fun=None,
             devices=gpus,
             cpu_device=args.use_cpu,
