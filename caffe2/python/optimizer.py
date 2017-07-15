@@ -5,7 +5,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from past.builtins import basestring
 
 from caffe2.python import core, scope
@@ -16,10 +16,14 @@ from caffe2.proto import caffe2_pb2
 _OPTIMIZER_ITERATION_NAME = "optimizer_iteration"
 
 AuxOptimizerParams = namedtuple("AuxOptimizerParams", ["local", "shared"])
+_optimizer_instance_count = defaultdict(int)
+
 
 class Optimizer(object):
     def __init__(self):
         self._aux_params = AuxOptimizerParams(local=[], shared=[])
+        self._instance_num = _optimizer_instance_count[self.__class__.__name__]
+        _optimizer_instance_count[self.__class__.__name__] += 1
 
     '''
     Adds optimization operators to the net for given parameter and its gradient
@@ -44,10 +48,26 @@ class Optimizer(object):
     def _run(self, net, param_init_net, param_info):
         raise Exception("Not Impelemented")
 
-    @staticmethod
-    def build_lr(net, param_init_net, base_learning_rate,
-                 learning_rate_blob="lr", policy="fixed",
+    def get_lr_blob_name(self):
+        """Returns an LR blob name.
+        The name will be unique to the current device and optimizer instance.
+        """
+        classname = self.__class__.__name__
+        current_scope = scope.CurrentDeviceScope()
+        if current_scope is None:
+            return '%s_%d_lr_cpu' % (classname, self._instance_num)
+        if current_scope.device_type == caffe2_pb2.CUDA:
+            return '%s_%d_lr_gpu%d' % (
+                classname, self._instance_num, current_scope.cuda_gpu_id
+            )
+        else:
+            return '%s_%d_lr_cpu' % (classname, self._instance_num)
+
+    def build_lr(self, net, param_init_net, base_learning_rate,
+                 learning_rate_blob=None, policy="fixed",
                  iter_val=0, **kwargs):
+        if learning_rate_blob is None:
+            learning_rate_blob = self.get_lr_blob_name()
         if not param_init_net.BlobIsDefined(_OPTIMIZER_ITERATION_NAME):
             # Add training operators.
             with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
@@ -60,15 +80,18 @@ class Optimizer(object):
         else:
             iteration = param_init_net.GetBlobRef(_OPTIMIZER_ITERATION_NAME)
 
-        # There is one interesting thing here: since we are minimizing, we are
-        # doing "descent" so the learning rate is set to be negative.
-        lr = net.LearningRate(
-            [iteration],
-            learning_rate_blob,
-            base_lr=-base_learning_rate,
-            policy=policy,
-            **kwargs
-        )
+        if not net.BlobIsDefined(learning_rate_blob):
+            # There is one interesting thing here: since we are minimizing, we are
+            # doing "descent" so the learning rate is set to be negative.
+            lr = net.LearningRate(
+                [iteration],
+                learning_rate_blob,
+                base_lr=-base_learning_rate,
+                policy=policy,
+                **kwargs
+            )
+        else:
+            lr = net.GetBlobRef(learning_rate_blob)
         return lr, iteration
 
     @staticmethod
@@ -138,7 +161,6 @@ class SgdOptimizer(Optimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.base_learning_rate * lr_sign,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -208,7 +230,7 @@ class MultiPrecisionSgdOptimizer(SgdOptimizer):
                 if param_info.blob_copy is not None else None
 
         # If we have a straight fp32 parameter, run the base class
-        if param_fp32 == None:
+        if param_fp32 is None:
             return SgdOptimizer._run(self, net, param_init_net, param_info)
 
         grad = param_info.grad
@@ -219,7 +241,6 @@ class MultiPrecisionSgdOptimizer(SgdOptimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=-self.base_learning_rate,
-            learning_rate_blob=param + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -295,7 +316,6 @@ class AdagradOptimizer(Optimizer):
         lr, _ = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.alpha,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -404,7 +424,6 @@ class AdamOptimizer(Optimizer):
         lr, iteration = self.build_lr(
             net, param_init_net,
             base_learning_rate=self.alpha,
-            learning_rate_blob=str(param) + "_lr",
             policy=self.policy,
             **(self.init_kwargs)
         )
@@ -478,7 +497,7 @@ def get_param_device(param_name, grad, param_to_device=None, default_device=None
     return device
 
 
-def _build(model, optimizer, weights_only=False):
+def _build(model, optimizer, weights_only=False, use_param_info_optim=True):
     param_to_device = _get_param_to_device(model)
 
     # Validate there are no duplicate params
@@ -494,7 +513,10 @@ def _build(model, optimizer, weights_only=False):
         device = get_param_device(param_name, param_info.grad, param_to_device)
 
         with core.DeviceScope(device):
-            optimizer(model.net, model.param_init_net, param_info)
+            if param_info.optimizer and use_param_info_optim:
+                param_info.optimizer(model.net, model.param_init_net, param_info)
+            else:
+                optimizer(model.net, model.param_init_net, param_info)
     return optimizer
 
 
@@ -510,6 +532,7 @@ def add_weight_decay(model, weight_decay):
         model,
         WeightDecayBuilder(weight_decay=weight_decay),
         weights_only=True,
+        use_param_info_optim=False,
     )
 
 
