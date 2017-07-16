@@ -66,13 +66,27 @@ OPERATOR_SCHEMA(Dropout)
     .NumInputs(1)
     .NumOutputs(2)
     .AllowInplace({{0, 0}})
+    .TensorInferenceFunction(
+        [](const OperatorDef& def, const vector<TensorShape>& in) {
+          vector<int> out_shape;
+          for (int i = 0; i < in[0].dims_size(); ++i)
+          {
+            out_shape.push_back(in[0].dims(i));
+          }
+
+          vector<TensorShape> out(2);
+          out[0] = CreateTensorShape(out_shape, TensorProto::FLOAT);
+          out[1] = CreateTensorShape(out_shape, TensorProto::FLOAT);
+
+          return out;
+        })
     .SetDoc(R"DOC(
-Dropout takes one input data (Tensor<float>) and produces two Tensor outputs,
-output (Tensor<float>) and mask (Tensor<bool>). Depending on whether it is in
-test mode or not, the output Y will either be a random dropout, or a simple
-copy of the input. Note that our implementation of Dropout does scaling in
-the training phase, so during testing nothing needs to be done.
-)DOC")
+     Dropout takes one input data (Tensor<float>) and produces two Tensor outputs,
+     output (Tensor<float>) and mask (Tensor<bool>). Depending on whether it is in
+     test mode or not, the output Y will either be a random dropout, or a simple
+     copy of the input. Note that our implementation of Dropout does scaling in
+     the training phase, so during testing nothing needs to be done.
+     )DOC")
     .Arg("ratio", "(float, default 0.5) the ratio of random dropout")
     .Arg("is_test", "(int, default 0) if nonzero, run dropout in test mode where "
                     "the output is simply Y = X.")
