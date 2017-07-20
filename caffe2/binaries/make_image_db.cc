@@ -21,6 +21,8 @@
 
 CAFFE2_DEFINE_bool(shuffle, false,
     "Randomly shuffle the order of images and their labels");
+CAFFE2_DEFINE_int(label_dim, 1, "The dimension of label");
+CAFFE2_DEFINE_bool(float_label, false, "Set data type of label to float, If true");
 CAFFE2_DEFINE_string(input_folder, "", "The input image file name.");
 CAFFE2_DEFINE_string(list_file, "", "The text file containing the list of images.");
 CAFFE2_DEFINE_string(output_db_name, "", "The output training leveldb name.");
@@ -40,13 +42,21 @@ void ConvertImageDataset(
     const string& input_folder, const string& list_filename,
     const string& output_db_name, const bool shuffle) {
   std::ifstream list_file(list_filename);
-  std::vector<std::pair<std::string, int> > lines;
+  std::vector<std::pair<std::string, std::vector<float> > > lines;
   std::string filename;
-  int file_label;
-  while (list_file >> filename >> file_label) {
-    lines.push_back(std::make_pair(filename, file_label));
+  float file_label;
+  while (list_file >> filename)
+  {
+    std::vector<float> label_vector(caffe2::FLAGS_label_dim, 0);
+    for (int i = 0; i < caffe2::FLAGS_label_dim; ++i)
+    {
+      list_file >> file_label;
+      label_vector[i] = file_label;
+    }
+    lines.push_back(std::make_pair(filename, label_vector));
   }
-  if (caffe2::FLAGS_shuffle) {
+  if (caffe2::FLAGS_shuffle)
+  {
     // randomly shuffle data
     LOG(INFO) << "Shuffling data";
     std::shuffle(lines.begin(), lines.end(),
@@ -62,21 +72,38 @@ void ConvertImageDataset(
   TensorProtos protos;
   TensorProto* data = protos.add_protos();
   TensorProto* label = protos.add_protos();
-  if (caffe2::FLAGS_raw) {
+  if (caffe2::FLAGS_raw)
+  {
     data->set_data_type(TensorProto::BYTE);
     data->add_dims(0);
     data->add_dims(0);
-    if (caffe2::FLAGS_color) {
+    if (caffe2::FLAGS_color)
+    {
       data->add_dims(3);
     }
-  } else {
+  } else
+  {
     data->set_data_type(TensorProto::STRING);
     data->add_dims(1);
     data->add_string_data("");
   }
-  label->set_data_type(TensorProto::INT32);
-  label->add_dims(1);
-  label->add_int32_data(0);
+  if (caffe2::FLAGS_float_label)
+  {
+    label->set_data_type(TensorProto::FLOAT);
+    label->add_dims(caffe2::FLAGS_label_dim);
+    for (int i = 0; i < caffe2::FLAGS_label_dim; ++i)
+    {
+      label->add_float_data(0);
+    }
+  } else
+  {
+    label->set_data_type(TensorProto::INT32);
+    label->add_dims(caffe2::FLAGS_label_dim);
+    for (int i = 0; i < caffe2::FLAGS_label_dim; ++i)
+    {
+      label->add_int32_data(0);
+    }
+  }
   const int kMaxKeyLength = 256;
   char key_cstr[kMaxKeyLength];
   string value;
@@ -84,7 +111,19 @@ void ConvertImageDataset(
 
   for (int item_id = 0; item_id < lines.size(); ++item_id) {
     // First, set label.
-    label->set_int32_data(0, lines[item_id].second);
+    if (caffe2::FLAGS_float_label)
+    {
+      for (int i = 0; i < caffe2::FLAGS_label_dim; ++i)
+      {
+	label->set_float_data(i, lines[item_id].second[i]);
+      }
+    } else
+    {
+      for (int i = 0; i < caffe2::FLAGS_label_dim; ++i)
+      {
+	label->set_int32_data(i, static_cast<int>(lines[item_id].second[i]));
+      }
+    }
     if (!caffe2::FLAGS_raw) {
       // Second, read images.
       std::ifstream image_file_stream(input_folder + lines[item_id].first);

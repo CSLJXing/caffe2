@@ -13,7 +13,7 @@ from caffe2.python import core, workspace, experiment_util, data_parallel_model
 from caffe2.python import dyndep, optimizer
 from caffe2.python import timeout_guard, model_helper, brew
 
-import caffe2.python.models.inception_bn as create_inception_bn
+from caffe2.python.models.inception_bn import create_inception_bn
 import caffe2.python.predictor.predictor_exporter as pred_exp
 import caffe2.python.predictor.predictor_py_utils as pred_utils
 from caffe2.python.predictor_constants import predictor_constants as predictor_constants
