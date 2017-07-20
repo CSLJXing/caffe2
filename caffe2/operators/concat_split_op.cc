@@ -129,6 +129,10 @@ OPERATOR_SCHEMA(Concat)
 
           return out;
         })
+    .Arg(
+        "add_axis",
+        "Pass 1 to add the axis specified in arg 'axis' to all "
+        "input tensors")
     .SetDoc("Concatenate a list of tensors into a single tensor")
     .Output(0, "concat_result", "Concatenated tensor")
     .Output(1, "split_info", "The dimensions of the inputs.");
