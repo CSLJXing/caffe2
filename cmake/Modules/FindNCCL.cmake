@@ -12,7 +12,7 @@
 include(FindPackageHandleStandardArgs)
 
 # TODO(slayton): Do this properly
-# set(NCCL_ROOT_DIR "/home/slayton/git/nccl/build" CACHE PATH "Folder contains NVIDIA NCCL")
+set(NCCL_ROOT_DIR "/home/ljxing/opt/nccl/" CACHE PATH "Folder contains NVIDIA NCCL")
 set(NCCL_ROOT_DIR "" CACHE PATH "Folder contains NVIDIA NCCL")
 
 find_path(NCCL_INCLUDE_DIR nccl.h
