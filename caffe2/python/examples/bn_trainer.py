@@ -13,11 +13,14 @@ from caffe2.python import core, workspace, experiment_util, data_parallel_model
 from caffe2.python import dyndep, optimizer
 from caffe2.python import timeout_guard, model_helper, brew
 
-from caffe2.python.models.inception_bn import create_inception_bn
 import caffe2.python.predictor.predictor_exporter as pred_exp
 import caffe2.python.predictor.predictor_py_utils as pred_utils
 from caffe2.python.predictor_constants import predictor_constants as predictor_constants
 from caffe2.proto import caffe2_pb2
+from caffe2.python.optimizer_context import UseOptimizer
+
+from caffe2.python.models.inception_bn import create_inception_bn
+
 
 
 '''
@@ -182,7 +185,7 @@ def RunEpoch(
         test_accuracies = (-1, -1, -1)
 
     learning_rate = workspace.FetchBlob(
-        'SgdOptimizer_0_lr_gpu' + str(train_model._devices[0])
+        'SgdOptimizer_1_lr_gpu' + str(train_model._devices[0])
     )
     explog.log(
         input_count=(epoch * epoch_iters * args.total_batch_size),
@@ -277,15 +280,36 @@ def Train(args):
 
     GenerateBatchSizeInfo(args)
 
+    stepsz = int(30 * args.epoch_size / args.total_batch_size / args.num_shards)
+    bias_optm = optimizer.SgdOptimizer(
+        2 * args.base_learning_rate,
+        momentum=0.9,
+        nesterov=1,
+        policy="step",
+        stepsize=stepsz,
+        gamma=0.1
+    )
     # Model building functions
     def create_bn_model_fn(model, loss_scale):
-        softmaxes, losses = create_inception_bn(
-            model,
-            "data",
-            input_channel=args.num_channels,
-            num_labels=args.num_labels,
-            label="label"
-        )
+        if model.arg_scope['is_test'] == False:
+            with UseOptimizer(
+                {'BIAS': bias_optm}
+            ):
+                softmaxes, losses = create_inception_bn(
+                    model,
+                    "data",
+                    input_channel=args.num_channels,
+                    num_labels=args.num_labels,
+                    label="label"
+                )
+        else:
+            softmaxes, losses = create_inception_bn(
+                model,
+                "data",
+                input_channel=args.num_channels,
+                num_labels=args.num_labels,
+                label="label"
+            )
         for idx, softmax in enumerate(softmaxes):
             brew.accuracy(model, [softmax, "label"], "cls{}_accuracy".format(idx+1))
         losses = [model.Scale(loss, scale=loss_scale) for loss in losses]
