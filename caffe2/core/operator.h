@@ -101,7 +101,7 @@ class OperatorBase {
   inline const vector<const Blob*>& Inputs() const { return inputs_; }
   inline const vector<Blob*>& Outputs() { return outputs_; }
 
-  virtual bool Run(int /* unused */ stream_id = 0) {
+  virtual bool Run(int /* unused */ /*stream_id*/ = 0) {
     CAFFE_NOT_IMPLEMENTED;
   }
 
@@ -142,7 +142,8 @@ class OperatorBase {
     return *operator_def_;
   }
 
-  inline void set_debug_def(std::shared_ptr<const OperatorDef>& operator_def) {
+  inline void set_debug_def(
+      const std::shared_ptr<const OperatorDef>& operator_def) {
     operator_def_ = operator_def;
   }
 
@@ -413,7 +414,7 @@ struct DispatchHelper<FixedValues<FirstVal, Values...>, ExtraArgs...> {
 template <typename... ExtraArgs>
 struct DispatchHelper<FixedValues<>, ExtraArgs...> {
   template <typename Op>
-  static bool call(Op* op, TIndex size) {
+  static bool call(Op* op, TIndex /*size*/) {
     return op->template DoRunWithValue<ExtraArgs..., -1>();
   }
 };
@@ -530,7 +531,12 @@ CAFFE_DECLARE_REGISTRY(
     Workspace*);
 #define REGISTER_CPU_OPERATOR_CREATOR(key, ...) \
   CAFFE_REGISTER_CREATOR(CPUOperatorRegistry, key, __VA_ARGS__)
-#define REGISTER_CPU_OPERATOR(name, ...) \
+#define REGISTER_CPU_OPERATOR(name, ...)                      \
+  extern void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(); \
+  static void __attribute__((__unused__))                     \
+      CAFFE_ANONYMOUS_VARIABLE_CPU##name() {                  \
+    CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name();           \
+  }                                                           \
   CAFFE_REGISTER_CLASS(CPUOperatorRegistry, name, __VA_ARGS__)
 #define REGISTER_CPU_OPERATOR_STR(str_name, ...) \
   CAFFE_REGISTER_TYPED_CLASS(CPUOperatorRegistry, str_name, __VA_ARGS__)
@@ -545,7 +551,12 @@ CAFFE_DECLARE_REGISTRY(
     Workspace*);
 #define REGISTER_CUDA_OPERATOR_CREATOR(key, ...) \
   CAFFE_REGISTER_CREATOR(CUDAOperatorRegistry, key, __VA_ARGS__)
-#define REGISTER_CUDA_OPERATOR(name, ...) \
+#define REGISTER_CUDA_OPERATOR(name, ...)                     \
+  extern void CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name(); \
+  static void __attribute__((__unused__))                     \
+      CAFFE_ANONYMOUS_VARIABLE_CUDA##name() {                 \
+    CAFFE2_PLEASE_ADD_OPERATOR_SCHEMA_FOR_##name();           \
+  }                                                           \
   CAFFE_REGISTER_CLASS(CUDAOperatorRegistry, name, __VA_ARGS__)
 #define REGISTER_CUDA_OPERATOR_STR(str_name, ...) \
   CAFFE_REGISTER_TYPED_CLASS(CUDAOperatorRegistry, str_name, __VA_ARGS__)

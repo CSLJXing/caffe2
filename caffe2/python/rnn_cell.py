@@ -21,6 +21,8 @@ from caffe2.python.attention import (
 )
 from caffe2.python import core, recurrent, workspace, brew, scope
 from caffe2.python.modeling.parameter_sharing import ParameterSharing
+from caffe2.python.modeling.parameter_info import ParameterTags
+from caffe2.python.modeling.initializers import Initializer
 from caffe2.python.model_helper import ModelHelper
 
 
@@ -314,32 +316,27 @@ class MILSTMCell(LSTMCell):
             axis=2,
         )
 
-        # defining MI parameters
-        alpha = model.param_init_net.ConstantFill(
-            [],
-            [self.scope('alpha')],
+        # defining initializers for MI parameters
+        alpha = model.create_param(
+            self.scope('alpha'),
             shape=[4 * self.hidden_size],
-            value=1.0,
+            initializer=Initializer('ConstantFill', value=1.0),
         )
-        beta_h = model.param_init_net.ConstantFill(
-            [],
-            [self.scope('beta1')],
+        beta_h = model.create_param(
+            self.scope('beta1'),
             shape=[4 * self.hidden_size],
-            value=1.0,
+            initializer=Initializer('ConstantFill', value=1.0),
         )
-        beta_i = model.param_init_net.ConstantFill(
-            [],
-            [self.scope('beta2')],
+        beta_i = model.create_param(
+            self.scope('beta2'),
             shape=[4 * self.hidden_size],
-            value=1.0,
+            initializer=Initializer('ConstantFill', value=1.0),
         )
-        b = model.param_init_net.ConstantFill(
-            [],
-            [self.scope('b')],
+        b = model.create_param(
+            self.scope('b'),
             shape=[4 * self.hidden_size],
-            value=0.0,
+            initializer=Initializer('ConstantFill', value=0.0),
         )
-        model.params.extend([alpha, beta_h, beta_i, b])
 
         # alpha * input_t + beta_h
         # Shape: [1, batch_size, 4 * hidden_size]
@@ -420,14 +417,19 @@ class DropoutCell(RNNCell):
         )
 
     def _prepare_output(self, model, states):
-        output = states[self.get_output_state_index()]
+        output = self.internal_cell._prepare_output(
+            model,
+            states,
+        )
         if self.dropout_ratio is not None:
             output = self._apply_dropout(model, output)
         return output
 
     def _prepare_output_sequence(self, model, state_outputs):
-        output_sequence_index = 2 * self.get_output_state_index()
-        output = state_outputs[output_sequence_index]
+        output = self.internal_cell._prepare_output_sequence(
+            model,
+            state_outputs,
+        )
         if self.dropout_ratio is not None:
             output = self._apply_dropout(model, output)
         return output
@@ -630,6 +632,7 @@ class AttentionCell(RNNCell):
         self,
         encoder_output_dim,
         encoder_outputs,
+        encoder_lengths,
         decoder_cell,
         decoder_state_dim,
         attention_type,
@@ -640,6 +643,7 @@ class AttentionCell(RNNCell):
         super(AttentionCell, self).__init__(**kwargs)
         self.encoder_output_dim = encoder_output_dim
         self.encoder_outputs = encoder_outputs
+        self.encoder_lengths = encoder_lengths
         self.decoder_cell = decoder_cell
         self.decoder_state_dim = decoder_state_dim
         self.weighted_encoder_outputs = weighted_encoder_outputs
@@ -698,6 +702,7 @@ class AttentionCell(RNNCell):
                 attention_weighted_encoder_context_t_prev=(
                     attention_weighted_encoder_context_t_prev
                 ),
+                encoder_lengths=self.encoder_lengths,
             )
         else:
             (
@@ -712,6 +717,7 @@ class AttentionCell(RNNCell):
                 decoder_hidden_state_t=self.hidden_t_intermediate,
                 decoder_hidden_state_dim=self.decoder_state_dim,
                 scope=self.name,
+                encoder_lengths=self.encoder_lengths,
             )
 
         if self.attention_memory_optimization:
@@ -805,6 +811,7 @@ class LSTMWithAttentionCell(AttentionCell):
         self,
         encoder_output_dim,
         encoder_outputs,
+        encoder_lengths,
         decoder_input_dim,
         decoder_state_dim,
         name,
@@ -827,6 +834,7 @@ class LSTMWithAttentionCell(AttentionCell):
         super(LSTMWithAttentionCell, self).__init__(
             encoder_output_dim=encoder_output_dim,
             encoder_outputs=encoder_outputs,
+            encoder_lengths=encoder_lengths,
             decoder_cell=decoder_cell,
             decoder_state_dim=decoder_state_dim,
             name=name,
@@ -971,20 +979,17 @@ def _LSTM(
         for i in range(num_layers):
             with core.NameScope(scope):
                 suffix = '_{}'.format(i) if num_layers > 1 else ''
-                initial_hidden = model.param_init_net.ConstantFill(
-                    [],
+                initial_hidden = model.create_param(
                     'initial_hidden_state' + suffix,
                     shape=[dim_out[i]],
-                    value=0.0,
+                    initializer=Initializer('ConstantFill', value=0.0),
                 )
-                initial_cell = model.param_init_net.ConstantFill(
-                    [],
+                initial_cell = model.create_param(
                     'initial_cell_state' + suffix,
                     shape=[dim_out[i]],
-                    value=0.0,
+                    initializer=Initializer('ConstantFill', value=0.0),
                 )
                 initial_states.extend([initial_hidden, initial_cell])
-                model.params.extend([initial_hidden, initial_cell])
 
     assert len(initial_states) == 2 * num_layers, \
             "Incorrect initial_states, was expecting 2 * num_layers elements" \
@@ -1188,11 +1193,12 @@ def cudnn_LSTM(model, input_blob, initial_states, dim_in, dim_out,
                          recurrent_bias_size
         total_sz = 4 * (first_layer_sz + (num_layers - 1) * upper_layer_sz)
 
-        weights = model.param_init_net.UniformFill(
-            [], "lstm_weight", shape=[total_sz])
-
-        model.params.append(weights)
-        model.weights.append(weights)
+        weights = model.create_param(
+            'lstm_weight',
+            shape=[total_sz],
+            initializer=Initializer('UniformFill'),
+            tags=ParameterTags.WEIGHT,
+        )
 
         lstm_args = {
             'hidden_size': dim_out,
@@ -1269,6 +1275,7 @@ def LSTMWithAttention(
     initial_attention_weighted_encoder_context,
     encoder_output_dim,
     encoder_outputs,
+    encoder_lengths,
     decoder_input_dim,
     decoder_state_dim,
     scope,
@@ -1311,6 +1318,9 @@ def LSTMWithAttention(
     encoder_outputs: the sequence, on which we compute the attention context
     at every iteration
 
+    encoder_lengths: a tensor with lengths of each encoder sequence in batch
+    (may be None, meaning all encoder sequences are of same length)
+
     decoder_input_dim: input dimension (last dimension on decoder_inputs)
 
     decoder_state_dim: size of hidden states of LSTM
@@ -1337,6 +1347,7 @@ def LSTMWithAttention(
     cell = LSTMWithAttentionCell(
         encoder_output_dim=encoder_output_dim,
         encoder_outputs=encoder_outputs,
+        encoder_lengths=encoder_lengths,
         decoder_input_dim=decoder_input_dim,
         decoder_state_dim=decoder_state_dim,
         name=scope,

@@ -39,8 +39,10 @@ CAFFE2_DEFINE_bool(warp, false, "If warp is set, warp the images to square.");
 namespace caffe2 {
 
 void ConvertImageDataset(
-    const string& input_folder, const string& list_filename,
-    const string& output_db_name, const bool shuffle) {
+    const string& input_folder,
+    const string& list_filename,
+    const string& output_db_name,
+    const bool /*shuffle*/) {
   std::ifstream list_file(list_filename);
   std::vector<std::pair<std::string, std::vector<float> > > lines;
   std::string filename;
