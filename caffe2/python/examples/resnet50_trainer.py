@@ -245,6 +245,7 @@ def Train(args):
                 core.CreateOperator(
                     "FileStoreHandlerCreate", [], [store_handler],
                     path=args.file_store_path,
+                    prefix=args.run_id,
                 )
             )
         rendezvous = dict(
@@ -326,7 +327,7 @@ def Train(args):
             'mirror': False
         }
         test_model = model_helper.ModelHelper(
-            name="resnet50_test", arg_scope=test_arg_scope
+            name="resnet50_test", arg_scope=test_arg_scope, init_params=False
         )
 
         test_reader = test_model.CreateDB(

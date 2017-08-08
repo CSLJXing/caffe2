@@ -31,6 +31,7 @@ def Parallelize_CPU(*args, **kwargs):
     kwargs['cpu_device'] = True
     Parallelize(*args, **kwargs)
 
+
 def Parallelize(
     model_helper_obj,
     input_builder_fun,
@@ -141,6 +142,21 @@ def Parallelize(
         param_update_builder_fun is not None and
         optimizer_builder_fun is not None
     ), 'Can only specify one of param_update_builder_fun, optimizer_builder_fun'
+
+    # Check that a model that is used for validation/testing has
+    # init_params False, otherwise running the param init net will overwrite
+    # synchronized values by the training net
+    if not has_parameter_updates and model_helper_obj.init_params:
+        log.warning('')
+        log.warning("############# WARNING #############")
+        log.warning("Model {}/{} is used for testing/validation but".format(
+            model_helper_obj.name, model_helper_obj))
+        log.warning("has init_params=True!")
+        log.warning("This can conflict with model training.")
+        log.warning("Please ensure model = ModelHelper(init_params=False)")
+        log.warning('####################################')
+        log.warning('')
+        # TODO: make into assert
 
     for device in devices:
         device_opt = core.DeviceOption(model_helper_obj._device_type, device)
@@ -546,7 +562,8 @@ def Synchronize(model, timeout_sec=30):
     barrier_instance += 1
     barrier_net = core.Net("sync_barrier_net_" + str(instance))
     comm_world = barrier_net.CreateCommonWorld(
-        model._rendezvous['kv_handler'],
+        [model._rendezvous['kv_handler']] +
+        _GetCommonWorldToFork(model.param_init_net),
         "sync_barrier_cw_" + str(instance),
         name="sync_barrier_cw_op_" + str(instance),
         size=model._rendezvous['num_shards'],
@@ -562,6 +579,44 @@ def Synchronize(model, timeout_sec=30):
         status_blob="sync_barrier_status_" + str(instance),
     )
     workspace.RunNetOnce(barrier_net)
+
+
+def ConvertNetForDevice(net, device=None):
+    '''
+    Converts all blobs in the net to have namescope gpu_X, and correct
+    device scope. You can use this to enable AppendNet with a
+    forward_pass_builder_fun:
+
+       def builder_fun(model):
+          ...
+          model.net.AppendNet(
+             data_parallel_model.ConvertNetForDevice(othermodel.net))
+          model.param_init_net.AppendNet(
+             data_parallel_model.ConvertNetForDevice(othermodel.param_init_net))
+    '''
+    mnet = copy.deepcopy(net)
+
+    if device is None:
+        device = scope.CurrentDeviceScope()
+
+    device_prefix = "gpu" if device.device_type == caffe2_pb2.CUDA else "cpu"
+
+    namescope = "{}_{}/".format(device_prefix, device.cuda_gpu_id)
+    for op in mnet.Proto().op:
+        if "RecurrentNetwork" in op.type:
+            raise("RecurrentNetwork conversion not yet supported")
+        for i, inputb in enumerate(op.input):
+            op.input[i] = namescope + inputb
+        for i, outputb in enumerate(op.output):
+            op.output[i] = namescope + outputb
+        for i, blob in enumerate(op.control_input):
+            op.control_input[i] = namescope + blob
+        op.device_option.CopyFrom(device)
+    for i, einp in enumerate(mnet.Proto().external_input):
+        mnet.Proto().external_input[i] = namescope + einp
+    for i, eoutp in enumerate(mnet.Proto().external_output):
+        mnet.Proto().external_output[i] = namescope + eoutp
+    return mnet
 
 
 def _ForEachGPU(gpu_ids, f, scoped=False, *args, **kwargs):
@@ -845,7 +900,7 @@ def _SyncAllParamsDistributed(
 
     for param_name in sorted(unique_param_names):
         master_param = model._device_grouped_blobs[param_name][devices[0]]
-        params_group = model._device_grouped_blobs[param_name].values()
+        params_group = list(viewvalues(model._device_grouped_blobs[param_name]))
 
         def broadcast(params):
             comm_world, control_input = context.get_control_and_context(params)
@@ -933,7 +988,8 @@ class CollectivesConcurrencyControl(object):
         current_slot = self.counter % self.max_concurrent_context
         if len(self.common_worlds) < self.max_concurrent_context:
             common_world = self.param_init_net.CreateCommonWorld(
-                self.rendezvous['kv_handler'],
+                [self.rendezvous['kv_handler']] +
+                _GetCommonWorldToFork(self.param_init_net),
                 "{}_{}_cw".format(self.name, current_slot),
                 name="{}_{}_cw_op".format(self.name, current_slot),
                 size=self.rendezvous['num_shards'],
@@ -1366,6 +1422,17 @@ def OptimizeGradientMemory(model,
             share_activations=recycle_activations,
             blob_shapes=shapes,
         )
+
+
+def _GetCommonWorldToFork(param_init_net):
+    '''
+    We can fork common worlds from existing ones. So inspect the param_init_net
+    for an already created commonworld
+    '''
+    for op in param_init_net.Proto().op:
+        if op.type == "CreateCommonWorld":
+            return [op.output[0]]
+    return []
 
 
 barrier_instance = 0

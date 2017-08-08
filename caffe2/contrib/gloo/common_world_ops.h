@@ -52,9 +52,34 @@ class CreateCommonWorld final : public Operator<Context> {
 
     try {
       // Create context and connect everyone to everyone
-      auto context =
-          std::make_shared<::gloo::rendezvous::Context>(rank_, size_);
-      context->connectFullMesh(store, device_);
+      std::shared_ptr<::gloo::Context> context;
+
+      if (InputSize() == 1) {
+        auto new_context =
+            std::make_shared<::gloo::rendezvous::Context>(rank_, size_);
+        new_context->connectFullMesh(store, device_);
+        context = std::move(new_context);
+      } else {
+        VLOG(1) << "Attempt new common world by forking existing one.";
+        auto backingCommonWorld =
+            OperatorBase::Input<std::shared_ptr<::gloo::Context>>(EXISTING_CW);
+
+        // Check compatibility of existing context with new one
+        // We check both size and timeout
+        if (rank_ != backingCommonWorld->rank ||
+            size_ != backingCommonWorld->size ||
+            backingCommonWorld->getDevice()->getTimeout() <
+                device_->getTimeout()) {
+          VLOG(1) << "Incompatible common world -- creating new context.";
+          auto new_context =
+              std::make_shared<::gloo::rendezvous::Context>(rank_, size_);
+          new_context->connectFullMesh(store, device_);
+          context = std::move(new_context);
+        } else {
+          ::gloo::rendezvous::ContextFactory factory(backingCommonWorld);
+          context = factory.makeContext(device_);
+        }
+      }
 
       // Switch pairs to synchronous mode if configured to do so
       if (sync_) {
@@ -100,7 +125,7 @@ class CreateCommonWorld final : public Operator<Context> {
   Workspace* ws_;
   std::string status_blob_;
 
-  INPUT_TAGS(STORE_HANDLER);
+  INPUT_TAGS(STORE_HANDLER, EXISTING_CW);
   OUTPUT_TAGS(COMM);
 };
 
