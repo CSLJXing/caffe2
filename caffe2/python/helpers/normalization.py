@@ -117,3 +117,8 @@ def spatial_bn(model, blob_in, blob_out, dim_in, order="NCHW", **kwargs):
             order=order, **kwargs)
         # Return the output
         return blob_outputs[0]
+
+
+def normalize_l2(model, blob_in, blob_out, **kwargs):
+    """Given a matrix, apply L2-normalization along the specified axis"""
+    return model.net.Normalize(blob_in, blob_out, **kwargs)
